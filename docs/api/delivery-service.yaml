@@ -1,0 +1,152 @@
+openapi: 3.0.3
+info:
+  title: Delivery Service API
+  description: >
+    Gestion des livreurs (profil, disponibilité) et des livraisons (assignation, tracking simulé,
+    confirmation). Participant de la SAGA de commande : consomme AssignCourier (delivery.commands) et
+    publie CourierAssigned/NoCourierAvailable/DeliveryStatusChanged/DeliveryCompleted (delivery.events).
+  version: "1.0.0"
+servers:
+  - url: /v1/delivery
+paths:
+  /couriers:
+    post:
+      summary: Inscription d'un livreur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourierCreateRequest" }
+      responses:
+        "201":
+          description: Livreur créé
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Courier" }
+
+  /couriers/{id}/availability:
+    put:
+      summary: Déclarer sa disponibilité
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [OFFLINE, AVAILABLE] }
+                location:
+                  type: object
+                  properties:
+                    lat: { type: number }
+                    lng: { type: number }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Courier" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /deliveries/{id}:
+    get:
+      summary: Suivi d'une livraison (position simulée, statut)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Delivery" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /deliveries/order/{orderId}:
+    get:
+      summary: Suivi d'une livraison par identifiant de commande
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Delivery" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /deliveries/{id}/confirm:
+    post:
+      summary: Confirmation de livraison (par le livreur, à la remise du colis)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202":
+          description: Confirmation prise en compte (publie DeliveryCompleted)
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  responses:
+    NotFound:
+      description: Ressource introuvable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    CourierCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+
+    Courier:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [OFFLINE, AVAILABLE, BUSY] }
+        location:
+          type: object
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+
+    Delivery:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        courierId: { type: string, format: uuid, nullable: true }
+        status:
+          type: string
+          enum: [PENDING, ASSIGNED, PICKED_UP, IN_TRANSIT, DELIVERED, FAILED]
+        currentLocation:
+          type: object
+          nullable: true
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+          description: Position simulée du livreur, mise à jour périodiquement
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }

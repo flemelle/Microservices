@@ -1,0 +1,257 @@
+openapi: 3.0.3
+info:
+  title: Restaurant Service API
+  description: >
+    Gestion du profil restaurant, du menu, des horaires, et acceptation/refus des commandes.
+    Côté "Commande" (write) du CQRS avec catalog-service.
+  version: "1.0.0"
+servers:
+  - url: /v1/restaurants
+paths:
+  /:
+    get:
+      summary: Lister les restaurants (vue interne, non optimisée recherche — voir catalog-service pour la recherche client)
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, default: 20 }
+      responses:
+        "200":
+          description: Liste paginée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Restaurant" }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+    post:
+      summary: Inscription d'un nouveau restaurant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RestaurantCreateRequest" }
+      responses:
+        "201":
+          description: Restaurant créé (publie RestaurantCreated sur restaurant.events)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Restaurant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /{id}:
+    get:
+      summary: Détail d'un restaurant
+      parameters: [ { $ref: "#/components/parameters/RestaurantId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Restaurant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /{id}/validate:
+    get:
+      summary: >
+        Valide qu'un restaurant est ouvert et que les items/prix d'un panier sont à jour.
+        Utilisé en synchrone par order-service (protégé par Circuit Breaker/Retry/Timeout côté appelant).
+      parameters:
+        - { $ref: "#/components/parameters/RestaurantId" }
+        - name: items
+          in: query
+          required: true
+          description: Liste d'ids de menuItem séparés par virgule
+          schema: { type: string }
+      responses:
+        "200":
+          description: Restaurant ouvert et items valides
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationResult" }
+        "409":
+          description: Restaurant fermé ou item indisponible
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /{id}/menu:
+    get:
+      summary: Consulter le menu d'un restaurant
+      parameters: [ { $ref: "#/components/parameters/RestaurantId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MenuItem" }
+    post:
+      summary: Ajouter un plat au menu (publie MenuItemUpserted)
+      parameters: [ { $ref: "#/components/parameters/RestaurantId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MenuItemCreateRequest" }
+      responses:
+        "201":
+          description: Plat créé
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MenuItem" }
+
+  /{id}/orders/{orderId}/accept:
+    post:
+      summary: Le restaurant accepte une commande reçue
+      parameters:
+        - { $ref: "#/components/parameters/RestaurantId" }
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202":
+          description: Acceptation prise en compte (publie OrderAccepted vers order-service)
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /{id}/orders/{orderId}/reject:
+    post:
+      summary: Le restaurant refuse une commande reçue
+      parameters:
+        - { $ref: "#/components/parameters/RestaurantId" }
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "202":
+          description: Refus pris en compte
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  parameters:
+    RestaurantId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Requête invalide
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Ressource introuvable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Service temporairement indisponible (circuit breaker ouvert côté appelant)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Restaurant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        cuisineType: { type: string, example: "Italien" }
+        address: { type: string }
+        location:
+          type: object
+          properties:
+            lat: { type: number, format: double }
+            lng: { type: number, format: double }
+        isOpen: { type: boolean }
+        openingHours:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string, example: "MONDAY" }
+              opensAt: { type: string, example: "11:30" }
+              closesAt: { type: string, example: "22:00" }
+
+    RestaurantCreateRequest:
+      type: object
+      required: [name, cuisineType, address]
+      properties:
+        name: { type: string }
+        cuisineType: { type: string }
+        address: { type: string }
+        location:
+          type: object
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+
+    MenuItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        restaurantId: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        price: { type: number, format: decimal, example: 12.50 }
+        options:
+          type: array
+          items: { type: string }
+        available: { type: boolean }
+
+    MenuItemCreateRequest:
+      type: object
+      required: [name, price]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        price: { type: number }
+        options:
+          type: array
+          items: { type: string }
+
+    ValidationResult:
+      type: object
+      properties:
+        restaurantOpen: { type: boolean }
+        allItemsAvailable: { type: boolean }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              menuItemId: { type: string, format: uuid }
+              name: { type: string }
+              price: { type: number }
+              available: { type: boolean }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }

@@ -1,0 +1,125 @@
+openapi: 3.0.3
+info:
+  title: Payment Service API
+  description: >
+    Intégration avec une passerelle de paiement externe (mockée). Participant de la SAGA de commande :
+    consomme ProcessPayment/RefundPayment (payment.commands) et publie PaymentSucceeded/PaymentFailed/
+    PaymentRefunded (payment.events). Expose aussi une API REST de consultation.
+  version: "1.0.0"
+servers:
+  - url: /v1/payments
+paths:
+  /:
+    post:
+      summary: >
+        Déclenche un paiement de manière synchrone (endpoint de démonstration/débogage — le flux
+        nominal de la SAGA passe par le topic Kafka payment.commands, pas par cet endpoint).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentRequest" }
+      responses:
+        "202":
+          description: Paiement pris en charge (résultat publié de façon asynchrone sur payment.events)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+
+  /{id}:
+    get:
+      summary: Consulter le statut d'un paiement
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /order/{orderId}:
+    get:
+      summary: Consulter le paiement associé à une commande
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /{id}/refund:
+    post:
+      summary: Rembourser un paiement (partiel ou total)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: number
+                  description: Montant à rembourser ; si absent, remboursement total
+      responses:
+        "202":
+          description: Remboursement engagé (publie PaymentRefunded sur payment.events)
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Paiement non capturé, remboursement impossible
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  responses:
+    NotFound:
+      description: Paiement introuvable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    PaymentRequest:
+      type: object
+      required: [orderId, amount]
+      properties:
+        orderId: { type: string, format: uuid }
+        amount: { type: number }
+        currency: { type: string, default: "EUR" }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        amount: { type: number }
+        currency: { type: string }
+        status:
+          type: string
+          enum: [AUTHORIZED, CAPTURED, FAILED, REFUNDED, PARTIALLY_REFUNDED]
+        provider: { type: string, example: "mock-gateway" }
+        createdAt: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }

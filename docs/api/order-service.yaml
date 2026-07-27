@@ -1,0 +1,155 @@
+openapi: 3.0.3
+info:
+  title: Order Service API
+  description: >
+    Gestion du panier et de la commande. Orchestrateur de la SAGA "Passage de commande"
+    (voir architecture.md §7). Machine à état du statut de commande.
+  version: "1.0.0"
+servers:
+  - url: /v1/orders
+paths:
+  /:
+    post:
+      summary: Créer une commande à partir d'un panier (déclenche la SAGA)
+      description: >
+        Valide synchroniquement le restaurant/les items (appel résilient à restaurant-service),
+        crée la commande en statut CREATED, puis déclenche la SAGA de manière asynchrone
+        (ProcessPayment sur Kafka).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderCreateRequest" }
+      responses:
+        "201":
+          description: Commande créée, SAGA engagée
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: restaurant-service indisponible (circuit breaker ouvert) — voir architecture.md §8
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /{id}:
+    get:
+      summary: Détail d'une commande et de son statut courant
+      parameters: [ { $ref: "#/components/parameters/OrderId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /{id}/status:
+    get:
+      summary: Historique des statuts de la commande (pour le suivi en temps réel côté client)
+      parameters: [ { $ref: "#/components/parameters/OrderId" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OrderStatusEvent" }
+
+  /{id}/cancel:
+    post:
+      summary: Le client demande l'annulation d'une commande (si le statut le permet)
+      parameters: [ { $ref: "#/components/parameters/OrderId" } ]
+      responses:
+        "202":
+          description: Annulation engagée (peut déclencher un remboursement compensatoire)
+        "409":
+          description: Commande dans un statut ne permettant plus l'annulation (ex. déjà livrée)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Requête invalide
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Commande introuvable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    OrderCreateRequest:
+      type: object
+      required: [customerId, restaurantId, items, deliveryAddress]
+      properties:
+        customerId: { type: string, format: uuid }
+        restaurantId: { type: string, format: uuid }
+        items:
+          type: array
+          items:
+            type: object
+            required: [menuItemId, quantity]
+            properties:
+              menuItemId: { type: string, format: uuid }
+              quantity: { type: integer, minimum: 1 }
+        deliveryAddress:
+          type: object
+          properties:
+            street: { type: string }
+            city: { type: string }
+            lat: { type: number }
+            lng: { type: number }
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        customerId: { type: string, format: uuid }
+        restaurantId: { type: string, format: uuid }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              menuItemId: { type: string, format: uuid }
+              name: { type: string }
+              unitPrice: { type: number }
+              quantity: { type: integer }
+        subtotal: { type: number }
+        deliveryFee: { type: number }
+        total: { type: number }
+        status:
+          type: string
+          enum: [CREATED, AWAITING_PAYMENT, PAID, AWAITING_COURIER, CONFIRMED, IN_PREPARATION, IN_DELIVERY, DELIVERED, CANCELLED]
+        courierId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    OrderStatusEvent:
+      type: object
+      properties:
+        status: { type: string }
+        occurredAt: { type: string, format: date-time }
+        detail: { type: string }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }

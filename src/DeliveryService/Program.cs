@@ -131,7 +131,7 @@ class DeliveryEventPublisher : IDisposable
         {
             BootstrapServers = bootstrapServers,
             Acks = Acks.All,
-            MessageTimeoutMs = 10000
+            MessageTimeoutMs = 5000
         }).Build();
     }
 

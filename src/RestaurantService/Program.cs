@@ -27,14 +27,21 @@ var chaosMode = new ChaosState();
 SeedData(restaurants, menuItems);
 
 var publisher = app.Services.GetRequiredService<RestaurantEventPublisher>();
-foreach (var r in restaurants.Values)
+
+// Publication en arriere-plan : le serveur HTTP doit demarrer immediatement meme si Kafka
+// n'est pas encore joignable (chaque tentative de publication peut prendre plusieurs secondes
+// avant d'echouer). La coherence catalog-service reste "eventuelle" par design (cf. ADR-0006).
+_ = Task.Run(async () =>
 {
-    await publisher.PublishAsync("RestaurantCreated", r.Id.ToString(), r);
-    foreach (var mi in menuItems.Values.Where(m => m.RestaurantId == r.Id))
+    foreach (var r in restaurants.Values)
     {
-        await publisher.PublishAsync("MenuItemUpserted", r.Id.ToString(), mi);
+        await publisher.PublishAsync("RestaurantCreated", r.Id.ToString(), r);
+        foreach (var mi in menuItems.Values.Where(m => m.RestaurantId == r.Id))
+        {
+            await publisher.PublishAsync("MenuItemUpserted", r.Id.ToString(), mi);
+        }
     }
-}
+});
 
 // ---------------------------------------------------------------------------
 // Endpoints
@@ -245,7 +252,7 @@ class RestaurantEventPublisher : IDisposable
         {
             BootstrapServers = bootstrapServers,
             Acks = Acks.All,
-            MessageTimeoutMs = 10000
+            MessageTimeoutMs = 5000
         }).Build();
     }
 

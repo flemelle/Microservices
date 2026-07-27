@@ -609,6 +609,90 @@ sequenceDiagram
     OS-->>Client: 201 Created
 ```
 
+### 12.5 Modèles de données simplifiés (par service)
+
+Chaque bloc correspond au stockage **local et indépendant** d'un service (aucune relation de clé
+étrangère inter-service : `restaurantId`/`orderId`/`courierId` sont des identifiants opaques copiés par
+valeur, jamais des jointures — cf. [ADR-0007](adr/0007-pas-de-bdd-partagee.md)). Le détail texte de chaque
+entité est donné au [§3.1](#31-détail-des-responsabilités-et-modèles-de-données).
+
+```mermaid
+erDiagram
+    RESTAURANT ||--o{ MENU_ITEM : propose
+    RESTAURANT {
+        guid id
+        string name
+        string cuisineType
+        geopoint location
+        bool isOpen
+    }
+    MENU_ITEM {
+        guid id
+        guid restaurantId "reference logique, pas de FK"
+        string name
+        decimal price
+        bool available
+    }
+
+    RESTAURANT_VIEW ||--o{ MENU_ITEM_VIEW : "projection CQRS (catalog-service)"
+    RESTAURANT_VIEW {
+        guid id
+        string name
+        string cuisineType
+        bool isOpen
+        datetime lastSyncedAt
+    }
+    MENU_ITEM_VIEW {
+        guid id
+        string name
+        decimal price
+        bool available
+    }
+
+    ORDER ||--|{ ORDER_ITEM : contient
+    ORDER ||--o{ ORDER_STATUS_EVENT : historise
+    ORDER {
+        guid id
+        guid customerId "reference logique"
+        guid restaurantId "reference logique"
+        guid courierId "reference logique, nullable"
+        decimal total
+        string status
+    }
+    ORDER_ITEM {
+        guid menuItemId "reference logique"
+        string name
+        decimal unitPrice
+        int quantity
+    }
+    ORDER_STATUS_EVENT {
+        string status
+        datetime occurredAt
+        string detail
+    }
+
+    PAYMENT {
+        guid id
+        guid orderId "reference logique"
+        decimal amount
+        string status
+    }
+
+    COURIER ||--o{ DELIVERY : effectue
+    COURIER {
+        guid id
+        string name
+        string status
+        geopoint location
+    }
+    DELIVERY {
+        guid id
+        guid orderId "reference logique"
+        guid courierId "reference logique, nullable"
+        string status
+    }
+```
+
 ---
 
 ## 13. Périmètre du prototype

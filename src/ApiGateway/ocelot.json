@@ -1,0 +1,70 @@
+{
+  "Routes": [
+    {
+      "DownstreamPathTemplate": "/v1/restaurants",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "restaurant-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/restaurants",
+      "UpstreamHttpMethod": [ "Get", "Post" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/restaurants/{everything}",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "restaurant-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/restaurants/{everything}",
+      "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/catalog/{everything}",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "catalog-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/catalog/{everything}",
+      "UpstreamHttpMethod": [ "Get" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/orders",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "order-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/orders",
+      "UpstreamHttpMethod": [ "Get", "Post" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/orders/{everything}",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "order-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/orders/{everything}",
+      "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/payments",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "payment-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/payments",
+      "UpstreamHttpMethod": [ "Get", "Post" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/payments/{everything}",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "payment-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/payments/{everything}",
+      "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/delivery/{everything}",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "delivery-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/delivery/{everything}",
+      "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ]
+    },
+    {
+      "DownstreamPathTemplate": "/v1/notifications",
+      "DownstreamScheme": "http",
+      "DownstreamHostAndPorts": [ { "Host": "notification-service", "Port": 8080 } ],
+      "UpstreamPathTemplate": "/v1/notifications",
+      "UpstreamHttpMethod": [ "Get" ]
+    }
+  ],
+  "GlobalConfiguration": {
+    "BaseUrl": "http://localhost:8080"
+  }
+}

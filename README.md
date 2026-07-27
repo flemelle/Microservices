@@ -171,9 +171,20 @@ docker compose down
 
 ## Note sur la génération de ce projet
 
-Ce prototype (documentation + code) a été rédigé avec l'assistance de Claude (Anthropic) dans un
-environnement sans SDK .NET ni Docker installés : le code n'a donc **pas pu être compilé ni exécuté**
-avant ce commit. Il a été relu attentivement (cohérence des contrats JSON entre services, signatures
-d'API .NET/Polly/Confluent.Kafka), mais un premier `docker compose up --build` doit être fait **avant
-la soutenance** pour corriger d'éventuelles erreurs de compilation ou de configuration qui n'auraient
-pas pu être détectées par relecture seule.
+Ce prototype (documentation + code) a été rédigé avec l'assistance de Claude (Anthropic), dans un
+environnement sans Docker. Un SDK .NET a été installé localement en cours de route pour valider
+réellement le code :
+
+- Les **7 projets compilent sans erreur ni avertissement** (`dotnet build`).
+- Un bug réel a été détecté puis corrigé par ce biais : `restaurant-service` bloquait le démarrage du
+  serveur HTTP jusqu'à 80s si Kafka n'était pas encore joignable (publication des événements de seed
+  faite en attente bloquante avant `app.Run()`) — la publication est désormais faite en arrière-plan.
+- Le **Circuit Breaker `order-service` → `restaurant-service` a été validé de bout en bout** (les deux
+  services lancés directement, sans Docker) : 5 échecs avec retries et backoff observés dans les logs,
+  ouverture du circuit après le 5ᵉ échec, puis fallback immédiat (2ms au lieu de ~1,4s) confirmé sur les
+  tentatives suivantes.
+
+Ce qui **n'a pas pu être testé** faute de Docker/Kafka en local : le flux Kafka complet (SAGA de bout en
+bout avec paiement et livraison réels, projection CQRS du catalogue, Kafka UI). Un premier
+`docker compose up --build` reste recommandé avant la soutenance pour lever ce dernier doute, mais les
+parties les plus à risque (compilation, démarrage, résilience) sont déjà vérifiées.

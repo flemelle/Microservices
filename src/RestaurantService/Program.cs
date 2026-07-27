@@ -54,7 +54,7 @@ app.MapGet("/v1/restaurants", (int page = 1, int pageSize = 20) =>
     return Results.Ok(new { items, page, pageSize, total = restaurants.Count });
 });
 
-app.MapPost("/v1/restaurants", async (RestaurantCreateRequest req) =>
+app.MapPost("/v1/restaurants", (RestaurantCreateRequest req) =>
 {
     var restaurant = new Restaurant
     {
@@ -67,7 +67,7 @@ app.MapPost("/v1/restaurants", async (RestaurantCreateRequest req) =>
         OpeningHours = new List<OpeningHours>()
     };
     restaurants[restaurant.Id] = restaurant;
-    await publisher.PublishAsync("RestaurantCreated", restaurant.Id.ToString(), restaurant);
+    _ = publisher.PublishAsync("RestaurantCreated", restaurant.Id.ToString(), restaurant);
     return Results.Created($"/v1/restaurants/{restaurant.Id}", restaurant);
 });
 
@@ -76,14 +76,14 @@ app.MapGet("/v1/restaurants/{id:guid}", (Guid id) =>
 
 app.MapGet("/v1/restaurants/{id:guid}/menu", (Guid id) =>
 {
-    if (!restaurants.ContainsKey(id)) return Results.NotFound(Error("NOT_FOUND", "Restaurant introuvable"));
+    if (RestaurantNotFound(id) is { } notFound) return notFound;
     var items = menuItems.Values.Where(m => m.RestaurantId == id).ToList();
     return Results.Ok(items);
 });
 
-app.MapPost("/v1/restaurants/{id:guid}/menu", async (Guid id, MenuItemCreateRequest req) =>
+app.MapPost("/v1/restaurants/{id:guid}/menu", (Guid id, MenuItemCreateRequest req) =>
 {
-    if (!restaurants.ContainsKey(id)) return Results.NotFound(Error("NOT_FOUND", "Restaurant introuvable"));
+    if (RestaurantNotFound(id) is { } notFound) return notFound;
     var item = new MenuItem
     {
         Id = Guid.NewGuid(),
@@ -95,7 +95,7 @@ app.MapPost("/v1/restaurants/{id:guid}/menu", async (Guid id, MenuItemCreateRequ
         Available = true
     };
     menuItems[item.Id] = item;
-    await publisher.PublishAsync("MenuItemUpserted", id.ToString(), item);
+    _ = publisher.PublishAsync("MenuItemUpserted", id.ToString(), item);
     return Results.Created($"/v1/restaurants/{id}/menu/{item.Id}", item);
 });
 
@@ -135,17 +135,17 @@ app.MapGet("/v1/restaurants/{id:guid}/validate", async (Guid id, string items) =
         : Results.Json(result, statusCode: StatusCodes.Status409Conflict);
 });
 
-app.MapPost("/v1/restaurants/{id:guid}/orders/{orderId:guid}/accept", async (Guid id, Guid orderId) =>
+app.MapPost("/v1/restaurants/{id:guid}/orders/{orderId:guid}/accept", (Guid id, Guid orderId) =>
 {
-    if (!restaurants.ContainsKey(id)) return Results.NotFound(Error("NOT_FOUND", "Restaurant introuvable"));
-    await publisher.PublishAsync("OrderAccepted", orderId.ToString(), new { orderId, restaurantId = id });
+    if (RestaurantNotFound(id) is { } notFound) return notFound;
+    _ = publisher.PublishAsync("OrderAccepted", orderId.ToString(), new { orderId, restaurantId = id });
     return Results.Accepted();
 });
 
-app.MapPost("/v1/restaurants/{id:guid}/orders/{orderId:guid}/reject", async (Guid id, Guid orderId, RejectRequest? req) =>
+app.MapPost("/v1/restaurants/{id:guid}/orders/{orderId:guid}/reject", (Guid id, Guid orderId, RejectRequest? req) =>
 {
-    if (!restaurants.ContainsKey(id)) return Results.NotFound(Error("NOT_FOUND", "Restaurant introuvable"));
-    await publisher.PublishAsync("OrderRejected", orderId.ToString(), new { orderId, restaurantId = id, reason = req?.Reason });
+    if (RestaurantNotFound(id) is { } notFound) return notFound;
+    _ = publisher.PublishAsync("OrderRejected", orderId.ToString(), new { orderId, restaurantId = id, reason = req?.Reason });
     return Results.Accepted();
 });
 
@@ -158,6 +158,9 @@ app.MapGet("/", () => Results.Ok(new { service = "restaurant-service", status = 
 app.Run();
 
 static object Error(string code, string message) => new { error = new { code, message } };
+
+IResult? RestaurantNotFound(Guid id) =>
+    restaurants.ContainsKey(id) ? null : Results.NotFound(Error("NOT_FOUND", "Restaurant introuvable"));
 
 static void SeedData(ConcurrentDictionary<Guid, Restaurant> restaurants, ConcurrentDictionary<Guid, MenuItem> menuItems)
 {

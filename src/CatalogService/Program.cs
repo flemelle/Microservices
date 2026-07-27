@@ -96,33 +96,18 @@ class RestaurantEventsConsumer : BackgroundService
 
     private void Consume(CancellationToken stoppingToken)
     {
-        var config = new ConsumerConfig
+        // Build()/Subscribe() sont des appels locaux (aucune I/O reseau immediate) : librdkafka gere
+        // en interne la (re)connexion aux brokers de facon asynchrone. Inutile de les entourer d'une
+        // boucle de retry - seule la boucle de consommation ci-dessous a besoin d'un try/catch.
+        using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
         {
             BootstrapServers = _bootstrapServers,
             GroupId = "catalog-service-cg",
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoCommit = true
-        };
-
-        IConsumer<string, string>? consumer = null;
-
-        // Boucle de reconnexion : Kafka peut ne pas encore etre pret au demarrage du conteneur.
-        while (!stoppingToken.IsCancellationRequested && consumer is null)
-        {
-            try
-            {
-                consumer = new ConsumerBuilder<string, string>(config).Build();
-                consumer.Subscribe("restaurant.events");
-                _logger.LogInformation("Abonne au topic restaurant.events (groupe catalog-service-cg)");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Kafka indisponible, nouvelle tentative dans 5s");
-                Thread.Sleep(5000);
-            }
-        }
-
-        if (consumer is null) return;
+        }).Build();
+        consumer.Subscribe("restaurant.events");
+        _logger.LogInformation("Abonne au topic restaurant.events (groupe catalog-service-cg)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -140,8 +125,6 @@ class RestaurantEventsConsumer : BackgroundService
                 _logger.LogError(ex, "Erreur de consommation Kafka");
             }
         }
-
-        consumer.Close();
     }
 
     private void Handle(string json)

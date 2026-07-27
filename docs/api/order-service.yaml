@@ -136,6 +136,14 @@ components:
           type: string
           enum: [CREATED, AWAITING_PAYMENT, PAID, AWAITING_COURIER, CONFIRMED, IN_PREPARATION, IN_DELIVERY, DELIVERED, CANCELLED]
         courierId: { type: string, format: uuid, nullable: true }
+        deliveryAddress:
+          type: object
+          nullable: true
+          properties:
+            street: { type: string }
+            city: { type: string }
+            lat: { type: number }
+            lng: { type: number }
         createdAt: { type: string, format: date-time }
 
     OrderStatusEvent:

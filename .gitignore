@@ -12,3 +12,6 @@ Thumbs.db
 ## Editors
 .idea/
 *.swp
+
+## Claude Code session-local state (not project content)
+.claude/scheduled_tasks.lock

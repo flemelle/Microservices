@@ -24,7 +24,7 @@ builder.Services
     .AddPolicyHandler(ResiliencePolicies.RetryPolicy())
     .AddPolicyHandler(ResiliencePolicies.TimeoutPolicy());
 
-var kafkaBootstrap = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+var kafkaBootstrap = OrderEventPublisher.GetKafkaBootstrap();
 
 var orders = new ConcurrentDictionary<Guid, Order>();
 builder.Services.AddSingleton(orders);
@@ -59,14 +59,10 @@ app.MapPost("/v1/orders", async (OrderCreateRequest req, IRestaurantClient resta
     if (!validation.RestaurantOpen || !validation.AllItemsAvailable)
         return Results.Json(Error("RESTAURANT_NOT_AVAILABLE", "Restaurant ferme ou article indisponible"), statusCode: StatusCodes.Status409Conflict);
 
-    var items = req.Items.Select(reqItem =>
-    {
-        var validated = validation.Items.First(v => v.MenuItemId == reqItem.MenuItemId);
-        return new OrderItem { MenuItemId = reqItem.MenuItemId, Name = validated.Name, UnitPrice = validated.Price, Quantity = reqItem.Quantity };
-    }).ToList();
-
-    var subtotal = items.Sum(i => i.UnitPrice * i.Quantity);
-    const decimal deliveryFee = 2.90m;
+    var validatedById = validation.Items.ToDictionary(v => v.MenuItemId);
+    var items = req.Items
+        .Select(reqItem => new OrderItem(reqItem.MenuItemId, validatedById[reqItem.MenuItemId].Name, validatedById[reqItem.MenuItemId].Price, reqItem.Quantity))
+        .ToList();
 
     var order = new Order
     {
@@ -74,50 +70,52 @@ app.MapPost("/v1/orders", async (OrderCreateRequest req, IRestaurantClient resta
         CustomerId = req.CustomerId,
         RestaurantId = req.RestaurantId,
         Items = items,
-        Subtotal = subtotal,
-        DeliveryFee = deliveryFee,
-        Total = subtotal + deliveryFee,
+        Subtotal = items.Sum(i => i.UnitPrice * i.Quantity),
+        DeliveryAddress = req.DeliveryAddress,
         Status = OrderStatus.CREATED,
         CreatedAt = DateTime.UtcNow
     };
     order.AddHistory(OrderStatus.CREATED, "Commande creee, en attente de paiement");
     orders[order.Id] = order;
 
-    await publisher.PublishAsync("OrderCreated", order.Id.ToString(), new { orderId = order.Id, customerId = order.CustomerId, restaurantId = order.RestaurantId, total = order.Total });
+    // Publications non bloquantes : un echec Kafka est deja journalise sans jamais faire echouer
+    // la reponse HTTP (cf. OrderEventPublisher.PublishCommandAsync) - attendre ici n'apporterait
+    // aucune garantie supplementaire, seulement de la latence sur le chemin critique de la requete.
+    _ = publisher.PublishAsync("OrderCreated", order.Id.ToString(), new { orderId = order.Id, customerId = order.CustomerId, restaurantId = order.RestaurantId, total = order.Total });
 
     // Etape 2 (asynchrone) : declenche le paiement via Kafka - order-service n'attend pas la reponse ici,
     // il reagira a PaymentSucceeded/PaymentFailed (voir SagaResultsConsumer).
     order.Status = OrderStatus.AWAITING_PAYMENT;
     order.AddHistory(OrderStatus.AWAITING_PAYMENT, "Paiement demande");
-    await publisher.PublishCommandAsync("payment.commands", "ProcessPayment", order.Id.ToString(), new { orderId = order.Id, amount = order.Total, currency = "EUR" });
+    _ = publisher.PublishCommandAsync("payment.commands", "ProcessPayment", order.Id.ToString(), new { orderId = order.Id, amount = order.Total, currency = "EUR" });
 
     return Results.Created($"/v1/orders/{order.Id}", order);
 });
 
 app.MapGet("/v1/orders/{id:guid}", (Guid id) =>
-    orders.TryGetValue(id, out var o) ? Results.Ok(o) : Results.NotFound(Error("NOT_FOUND", "Commande introuvable")));
+    FindOrder(id) is { } o ? Results.Ok(o) : Results.NotFound(Error("NOT_FOUND", "Commande introuvable")));
 
 app.MapGet("/v1/orders/{id:guid}/status", (Guid id) =>
-    orders.TryGetValue(id, out var o) ? Results.Ok(o.StatusHistory) : Results.NotFound(Error("NOT_FOUND", "Commande introuvable")));
+    FindOrder(id) is { } o ? Results.Ok(o.StatusHistory) : Results.NotFound(Error("NOT_FOUND", "Commande introuvable")));
 
-app.MapPost("/v1/orders/{id:guid}/cancel", async (Guid id) =>
+app.MapPost("/v1/orders/{id:guid}/cancel", (Guid id) =>
 {
-    if (!orders.TryGetValue(id, out var order)) return Results.NotFound(Error("NOT_FOUND", "Commande introuvable"));
+    if (FindOrder(id) is not { } order) return Results.NotFound(Error("NOT_FOUND", "Commande introuvable"));
 
     if (order.Status is OrderStatus.DELIVERED or OrderStatus.CANCELLED)
         return Results.Json(Error("INVALID_STATE", $"Commande dans l'etat {order.Status}, annulation impossible"), statusCode: StatusCodes.Status409Conflict);
 
     // Compensation : si un paiement a deja ete capture, on le rembourse avant d'annuler (cf. architecture.md §7.4).
-    if (order.Status is OrderStatus.PAID or OrderStatus.AWAITING_COURIER or OrderStatus.CONFIRMED or OrderStatus.IN_PREPARATION or OrderStatus.IN_DELIVERY)
+    if (order.HasCapturedPayment)
     {
-        await publisher.PublishCommandAsync("payment.commands", "RefundPayment", order.Id.ToString(), new { orderId = order.Id, amount = (decimal?)null });
+        _ = publisher.PublishCommandAsync("payment.commands", "RefundPayment", order.Id.ToString(), new { orderId = order.Id, amount = (decimal?)null });
         order.AddHistory(order.Status, "Annulation demandee par le client, remboursement en cours");
     }
     else
     {
         order.Status = OrderStatus.CANCELLED;
         order.AddHistory(OrderStatus.CANCELLED, "Annulee par le client avant paiement");
-        await publisher.PublishAsync("OrderCancelled", order.Id.ToString(), new { orderId = order.Id });
+        _ = publisher.PublishAsync("OrderCancelled", order.Id.ToString(), new { orderId = order.Id });
     }
 
     return Results.Accepted();
@@ -129,19 +127,15 @@ app.Run();
 
 static object Error(string code, string message) => new { error = new { code, message } };
 
+Order? FindOrder(Guid id) => orders.TryGetValue(id, out var o) ? o : null;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 enum OrderStatus { CREATED, AWAITING_PAYMENT, PAID, AWAITING_COURIER, CONFIRMED, IN_PREPARATION, IN_DELIVERY, DELIVERED, CANCELLED }
 
-class OrderItem
-{
-    public Guid MenuItemId { get; set; }
-    public string Name { get; set; } = "";
-    public decimal UnitPrice { get; set; }
-    public int Quantity { get; set; }
-}
+record OrderItem(Guid MenuItemId, string Name, decimal UnitPrice, int Quantity);
 
 record OrderStatusEvent(OrderStatus Status, DateTime OccurredAt, string? Detail);
 
@@ -149,17 +143,29 @@ record DeliveryAddress(string? Street, string? City, double? Lat, double? Lng);
 
 class Order
 {
+    private const decimal DeliveryFeeAmount = 2.90m;
+
     public Guid Id { get; set; }
     public Guid CustomerId { get; set; }
     public Guid RestaurantId { get; set; }
     public List<OrderItem> Items { get; set; } = new();
     public decimal Subtotal { get; set; }
-    public decimal DeliveryFee { get; set; }
-    public decimal Total { get; set; }
+    public decimal DeliveryFee => DeliveryFeeAmount;
+    public decimal Total => Subtotal + DeliveryFee;
     public OrderStatus Status { get; set; }
     public Guid? CourierId { get; set; }
+    public DeliveryAddress? DeliveryAddress { get; set; }
     public DateTime CreatedAt { get; set; }
     public List<OrderStatusEvent> StatusHistory { get; } = new();
+
+    /// <summary>
+    /// Vrai des lors que le paiement a ete capture et jusqu'a la livraison : sert a decider si une
+    /// annulation doit declencher un remboursement compensatoire (cf. architecture.md §7.4).
+    /// Detail d'implementation interne, non expose dans le contrat d'API (voir docs/api/order-service.yaml).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasCapturedPayment => Status is OrderStatus.PAID or OrderStatus.AWAITING_COURIER
+        or OrderStatus.CONFIRMED or OrderStatus.IN_PREPARATION or OrderStatus.IN_DELIVERY;
 
     public void AddHistory(OrderStatus status, string? detail = null) =>
         StatusHistory.Add(new OrderStatusEvent(status, DateTime.UtcNow, detail));
@@ -172,6 +178,8 @@ record OrderCreateRequest(Guid CustomerId, Guid RestaurantId, List<OrderItemRequ
 class OrderEventPublisher : IDisposable
 {
     private readonly IProducer<string, string> _producer;
+
+    public static string GetKafkaBootstrap() => Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
 
     public OrderEventPublisher(string bootstrapServers)
     {
@@ -228,37 +236,25 @@ class SagaResultsConsumer : BackgroundService
         _orders = orders;
         _publisher = publisher;
         _logger = logger;
-        _bootstrapServers = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+        _bootstrapServers = OrderEventPublisher.GetKafkaBootstrap();
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => Consume(stoppingToken), stoppingToken);
 
     private void Consume(CancellationToken stoppingToken)
     {
-        var config = new ConsumerConfig
+        // Build()/Subscribe() sont des appels locaux (aucune I/O reseau immediate) : librdkafka gere
+        // en interne la (re)connexion aux brokers de facon asynchrone. Inutile de les entourer d'une
+        // boucle de retry - seule la boucle de consommation ci-dessous a besoin d'un try/catch.
+        using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
         {
             BootstrapServers = _bootstrapServers,
             GroupId = "order-service-cg",
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoCommit = true
-        };
-
-        IConsumer<string, string>? consumer = null;
-        while (!stoppingToken.IsCancellationRequested && consumer is null)
-        {
-            try
-            {
-                consumer = new ConsumerBuilder<string, string>(config).Build();
-                consumer.Subscribe(new[] { "payment.events", "delivery.events" });
-                _logger.LogInformation("Abonne a payment.events et delivery.events (groupe order-service-cg)");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Kafka indisponible, nouvelle tentative dans 5s");
-                Thread.Sleep(5000);
-            }
-        }
-        if (consumer is null) return;
+        }).Build();
+        consumer.Subscribe(new[] { "payment.events", "delivery.events" });
+        _logger.LogInformation("Abonne a payment.events et delivery.events (groupe order-service-cg)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -270,7 +266,6 @@ class SagaResultsConsumer : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (ConsumeException ex) { _logger.LogError(ex, "Erreur de consommation Kafka"); }
         }
-        consumer.Close();
     }
 
     private async Task Handle(string topic, string json)
@@ -300,10 +295,24 @@ class SagaResultsConsumer : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Recupere la commande uniquement si elle est dans l'etat attendu pour cet evenement - sert de
+    /// garde d'idempotence commune aux handlers (evenement deja traite ou commande inconnue -> ignore).
+    /// </summary>
+    private bool TryGetOrderInState(Guid orderId, OrderStatus expected, out Order order)
+    {
+        if (_orders.TryGetValue(orderId, out var found) && found.Status == expected)
+        {
+            order = found;
+            return true;
+        }
+        order = null!;
+        return false;
+    }
+
     private async Task OnPaymentSucceeded(PaymentSucceededDto evt)
     {
-        if (!_orders.TryGetValue(evt.OrderId, out var order) || order.Status != OrderStatus.AWAITING_PAYMENT)
-            return; // idempotence : deja traite ou commande inconnue
+        if (!TryGetOrderInState(evt.OrderId, OrderStatus.AWAITING_PAYMENT, out var order)) return;
 
         order.Status = OrderStatus.PAID;
         order.AddHistory(OrderStatus.PAID, "Paiement capture");
@@ -315,8 +324,7 @@ class SagaResultsConsumer : BackgroundService
 
     private async Task OnPaymentFailed(PaymentFailedDto evt)
     {
-        if (!_orders.TryGetValue(evt.OrderId, out var order) || order.Status != OrderStatus.AWAITING_PAYMENT)
-            return;
+        if (!TryGetOrderInState(evt.OrderId, OrderStatus.AWAITING_PAYMENT, out var order)) return;
 
         order.Status = OrderStatus.CANCELLED;
         order.AddHistory(OrderStatus.CANCELLED, $"Paiement refuse : {evt.Reason}");
@@ -336,8 +344,7 @@ class SagaResultsConsumer : BackgroundService
 
     private async Task OnCourierAssigned(CourierAssignedDto evt)
     {
-        if (!_orders.TryGetValue(evt.OrderId, out var order) || order.Status != OrderStatus.AWAITING_COURIER)
-            return;
+        if (!TryGetOrderInState(evt.OrderId, OrderStatus.AWAITING_COURIER, out var order)) return;
 
         order.CourierId = evt.CourierId;
         order.Status = OrderStatus.CONFIRMED;
@@ -352,8 +359,7 @@ class SagaResultsConsumer : BackgroundService
     private async Task OnNoCourierAvailable(NoCourierAvailableDto evt)
     {
         // COMPENSATION : aucun livreur disponible -> on rembourse le paiement deja capture (cf. §7.4).
-        if (!_orders.TryGetValue(evt.OrderId, out var order) || order.Status != OrderStatus.AWAITING_COURIER)
-            return;
+        if (!TryGetOrderInState(evt.OrderId, OrderStatus.AWAITING_COURIER, out var order)) return;
 
         order.AddHistory(order.Status, $"Aucun livreur disponible ({evt.Reason}), remboursement en cours");
         await _publisher.PublishCommandAsync("payment.commands", "RefundPayment", order.Id.ToString(), new { orderId = order.Id, amount = (decimal?)null });
@@ -377,8 +383,7 @@ class SagaResultsConsumer : BackgroundService
 
     private async Task OnDeliveryCompleted(DeliveryCompletedDto evt)
     {
-        if (!_orders.TryGetValue(evt.OrderId, out var order) || order.Status != OrderStatus.IN_DELIVERY)
-            return;
+        if (!TryGetOrderInState(evt.OrderId, OrderStatus.IN_DELIVERY, out var order)) return;
 
         order.Status = OrderStatus.DELIVERED;
         order.AddHistory(OrderStatus.DELIVERED, "Commande livree");

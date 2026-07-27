@@ -9,7 +9,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
-var kafkaBootstrap = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+var kafkaBootstrap = DeliveryEventPublisher.GetKafkaBootstrap();
 
 var couriers = new ConcurrentDictionary<Guid, Courier>();
 var deliveries = new ConcurrentDictionary<Guid, Delivery>();
@@ -39,29 +39,27 @@ app.MapPost("/v1/delivery/couriers", (CourierCreateRequest req) =>
 
 app.MapPut("/v1/delivery/couriers/{id:guid}/availability", (Guid id, AvailabilityRequest req) =>
 {
-    if (!couriers.TryGetValue(id, out var courier)) return Results.NotFound(Error("NOT_FOUND", "Livreur introuvable"));
+    if (FindCourier(id) is not { } courier) return Results.NotFound(Error("NOT_FOUND", "Livreur introuvable"));
     courier.Status = req.Status;
     if (req.Location is not null) courier.Location = req.Location;
     return Results.Ok(courier);
 });
 
 app.MapGet("/v1/delivery/deliveries/{id:guid}", (Guid id) =>
-    deliveries.TryGetValue(id, out var d) ? Results.Ok(d) : Results.NotFound(Error("NOT_FOUND", "Livraison introuvable")));
+    FindDelivery(id) is { } d ? Results.Ok(d) : Results.NotFound(Error("NOT_FOUND", "Livraison introuvable")));
 
 app.MapGet("/v1/delivery/deliveries/order/{orderId:guid}", (Guid orderId) =>
-    deliveriesByOrder.TryGetValue(orderId, out var did) && deliveries.TryGetValue(did, out var d)
-        ? Results.Ok(d)
-        : Results.NotFound(Error("NOT_FOUND", "Livraison introuvable pour cette commande")));
+    FindDeliveryByOrder(orderId) is { } d ? Results.Ok(d) : Results.NotFound(Error("NOT_FOUND", "Livraison introuvable pour cette commande")));
 
 var publisher = app.Services.GetRequiredService<DeliveryEventPublisher>();
 
-app.MapPost("/v1/delivery/deliveries/{id:guid}/confirm", async (Guid id) =>
+app.MapPost("/v1/delivery/deliveries/{id:guid}/confirm", (Guid id) =>
 {
-    if (!deliveries.TryGetValue(id, out var delivery)) return Results.NotFound(Error("NOT_FOUND", "Livraison introuvable"));
+    if (FindDelivery(id) is not { } delivery) return Results.NotFound(Error("NOT_FOUND", "Livraison introuvable"));
     delivery.Status = DeliveryStatus.DELIVERED;
-    if (delivery.CourierId.HasValue && couriers.TryGetValue(delivery.CourierId.Value, out var courier))
+    if (delivery.CourierId.HasValue && FindCourier(delivery.CourierId.Value) is { } courier)
         courier.Status = CourierStatus.AVAILABLE;
-    await publisher.PublishAsync("DeliveryCompleted", delivery.OrderId.ToString(), new { orderId = delivery.OrderId, deliveryId = delivery.Id });
+    _ = publisher.PublishAsync("DeliveryCompleted", delivery.OrderId.ToString(), new { orderId = delivery.OrderId, deliveryId = delivery.Id });
     return Results.Accepted();
 });
 
@@ -74,6 +72,10 @@ app.MapGet("/", () => Results.Ok(new { service = "delivery-service", status = "u
 app.Run();
 
 static object Error(string code, string message) => new { error = new { code, message } };
+
+Courier? FindCourier(Guid id) => couriers.TryGetValue(id, out var c) ? c : null;
+Delivery? FindDelivery(Guid id) => deliveries.TryGetValue(id, out var d) ? d : null;
+Delivery? FindDeliveryByOrder(Guid orderId) => deliveriesByOrder.TryGetValue(orderId, out var id) ? FindDelivery(id) : null;
 
 static void SeedCouriers(ConcurrentDictionary<Guid, Courier> couriers)
 {
@@ -117,6 +119,14 @@ record AvailabilityRequest(CourierStatus Status, GeoPoint? Location);
 class DeliveryChaosState
 {
     public bool ForceNoCourierAvailable { get; set; }
+
+    /// <summary>Consomme (lit puis reinitialise) le forcage a usage unique utilise pendant la demo.</summary>
+    public bool TryConsumeForcedFailure()
+    {
+        if (!ForceNoCourierAvailable) return false;
+        ForceNoCourierAvailable = false;
+        return true;
+    }
 }
 
 /// <summary>Publie sur le topic Kafka "delivery.events".</summary>
@@ -124,6 +134,8 @@ class DeliveryEventPublisher : IDisposable
 {
     private readonly IProducer<string, string> _producer;
     private const string Topic = "delivery.events";
+
+    public static string GetKafkaBootstrap() => Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
 
     public DeliveryEventPublisher(string bootstrapServers)
     {
@@ -180,37 +192,25 @@ class DeliveryCommandsConsumer : BackgroundService
         _chaos = chaos;
         _publisher = publisher;
         _logger = logger;
-        _bootstrapServers = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+        _bootstrapServers = DeliveryEventPublisher.GetKafkaBootstrap();
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => Consume(stoppingToken), stoppingToken);
 
     private void Consume(CancellationToken stoppingToken)
     {
-        var config = new ConsumerConfig
+        // Build()/Subscribe() sont des appels locaux (aucune I/O reseau immediate) : librdkafka gere
+        // en interne la (re)connexion aux brokers de facon asynchrone. Inutile de les entourer d'une
+        // boucle de retry - seule la boucle de consommation ci-dessous a besoin d'un try/catch.
+        using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
         {
             BootstrapServers = _bootstrapServers,
             GroupId = "delivery-service-cg",
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoCommit = true
-        };
-
-        IConsumer<string, string>? consumer = null;
-        while (!stoppingToken.IsCancellationRequested && consumer is null)
-        {
-            try
-            {
-                consumer = new ConsumerBuilder<string, string>(config).Build();
-                consumer.Subscribe("delivery.commands");
-                _logger.LogInformation("Abonne au topic delivery.commands (groupe delivery-service-cg)");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Kafka indisponible, nouvelle tentative dans 5s");
-                Thread.Sleep(5000);
-            }
-        }
-        if (consumer is null) return;
+        }).Build();
+        consumer.Subscribe("delivery.commands");
+        _logger.LogInformation("Abonne au topic delivery.commands (groupe delivery-service-cg)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -222,7 +222,6 @@ class DeliveryCommandsConsumer : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (ConsumeException ex) { _logger.LogError(ex, "Erreur de consommation Kafka"); }
         }
-        consumer.Close();
     }
 
     private async Task Handle(string json)
@@ -243,11 +242,9 @@ class DeliveryCommandsConsumer : BackgroundService
                 return;
             }
 
-            var available = !_chaos.ForceNoCourierAvailable
-                ? _couriers.Values.FirstOrDefault(c => c.Status == CourierStatus.AVAILABLE)
-                : null;
-
-            if (_chaos.ForceNoCourierAvailable) _chaos.ForceNoCourierAvailable = false; // effet a usage unique pour la demo
+            var available = _chaos.TryConsumeForcedFailure()
+                ? null
+                : _couriers.Values.FirstOrDefault(c => c.Status == CourierStatus.AVAILABLE);
 
             if (available is null)
             {

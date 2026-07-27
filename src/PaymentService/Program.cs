@@ -9,7 +9,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
-var kafkaBootstrap = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+var kafkaBootstrap = PaymentProcessor.GetKafkaBootstrap();
 
 var payments = new ConcurrentDictionary<Guid, Payment>();
 var paymentsByOrder = new ConcurrentDictionary<Guid, Guid>();
@@ -29,32 +29,28 @@ app.UseSwaggerUI();
 var publisher = app.Services.GetRequiredService<PaymentEventPublisher>();
 
 // Endpoint de demonstration/debogage - le flux nominal de la SAGA passe par payment.commands (Kafka).
-app.MapPost("/v1/payments", async (PaymentRequest req) =>
+app.MapPost("/v1/payments", (PaymentRequest req) =>
 {
     var payment = PaymentProcessor.Process(req.OrderId, req.Amount, req.Currency ?? "EUR", payments, paymentsByOrder, chaos);
-    await PaymentProcessor.PublishResult(payment, publisher);
+    _ = PaymentProcessor.PublishResult(payment, publisher);
     return Results.Accepted(value: payment);
 });
 
 app.MapGet("/v1/payments/{id:guid}", (Guid id) =>
-    payments.TryGetValue(id, out var p) ? Results.Ok(p) : Results.NotFound(Error("NOT_FOUND", "Paiement introuvable")));
+    FindPayment(id) is { } p ? Results.Ok(p) : Results.NotFound(Error("NOT_FOUND", "Paiement introuvable")));
 
 app.MapGet("/v1/payments/order/{orderId:guid}", (Guid orderId) =>
-    paymentsByOrder.TryGetValue(orderId, out var pid) && payments.TryGetValue(pid, out var p)
-        ? Results.Ok(p)
-        : Results.NotFound(Error("NOT_FOUND", "Paiement introuvable pour cette commande")));
+    FindPaymentByOrder(orderId) is { } p ? Results.Ok(p) : Results.NotFound(Error("NOT_FOUND", "Paiement introuvable pour cette commande")));
 
-app.MapPost("/v1/payments/{id:guid}/refund", async (Guid id, RefundRequest? req) =>
+app.MapPost("/v1/payments/{id:guid}/refund", (Guid id, RefundRequest? req) =>
 {
-    if (!payments.TryGetValue(id, out var payment))
+    if (FindPayment(id) is not { } payment)
         return Results.NotFound(Error("NOT_FOUND", "Paiement introuvable"));
 
     if (payment.Status != PaymentStatus.CAPTURED)
         return Results.Json(Error("INVALID_STATE", "Paiement non capture, remboursement impossible"), statusCode: StatusCodes.Status409Conflict);
 
-    var refundAmount = req?.Amount ?? payment.Amount;
-    payment.Status = refundAmount >= payment.Amount ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;
-    await publisher.PublishAsync("PaymentRefunded", payment.OrderId.ToString(), new { orderId = payment.OrderId, paymentId = payment.Id, amount = refundAmount });
+    PaymentProcessor.Refund(payment, req?.Amount, publisher);
     return Results.Accepted();
 });
 
@@ -67,6 +63,9 @@ app.MapGet("/", () => Results.Ok(new { service = "payment-service", status = "up
 app.Run();
 
 static object Error(string code, string message) => new { error = new { code, message } };
+
+Payment? FindPayment(Guid id) => payments.TryGetValue(id, out var p) ? p : null;
+Payment? FindPaymentByOrder(Guid orderId) => paymentsByOrder.TryGetValue(orderId, out var id) ? FindPayment(id) : null;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,6 +102,8 @@ class PaymentChaosState
 
 static class PaymentProcessor
 {
+    public static string GetKafkaBootstrap() => Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+
     public static Payment Process(Guid orderId, decimal amount, string currency,
         ConcurrentDictionary<Guid, Payment> payments, ConcurrentDictionary<Guid, Guid> paymentsByOrder, PaymentChaosState chaos)
     {
@@ -131,6 +132,15 @@ static class PaymentProcessor
             await publisher.PublishAsync("PaymentFailed", payment.OrderId.ToString(),
                 new { orderId = payment.OrderId, reason = "Paiement refuse par la passerelle (mock)" });
         }
+    }
+
+    /// <summary>Calcule et applique un remboursement (partiel ou total), puis publie PaymentRefunded.</summary>
+    public static void Refund(Payment payment, decimal? amount, PaymentEventPublisher publisher)
+    {
+        var refundAmount = amount ?? payment.Amount;
+        payment.Status = refundAmount >= payment.Amount ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;
+        _ = publisher.PublishAsync("PaymentRefunded", payment.OrderId.ToString(),
+            new { orderId = payment.OrderId, paymentId = payment.Id, amount = refundAmount });
     }
 }
 
@@ -188,37 +198,25 @@ class PaymentCommandsConsumer : BackgroundService
         _chaos = chaos;
         _publisher = publisher;
         _logger = logger;
-        _bootstrapServers = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS") ?? "kafka:9092";
+        _bootstrapServers = PaymentProcessor.GetKafkaBootstrap();
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => Consume(stoppingToken), stoppingToken);
 
     private void Consume(CancellationToken stoppingToken)
     {
-        var config = new ConsumerConfig
+        // Build()/Subscribe() sont des appels locaux (aucune I/O reseau immediate) : librdkafka gere
+        // en interne la (re)connexion aux brokers de facon asynchrone. Inutile de les entourer d'une
+        // boucle de retry - seule la boucle de consommation ci-dessous a besoin d'un try/catch.
+        using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
         {
             BootstrapServers = _bootstrapServers,
             GroupId = "payment-service-cg",
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoCommit = true
-        };
-
-        IConsumer<string, string>? consumer = null;
-        while (!stoppingToken.IsCancellationRequested && consumer is null)
-        {
-            try
-            {
-                consumer = new ConsumerBuilder<string, string>(config).Build();
-                consumer.Subscribe("payment.commands");
-                _logger.LogInformation("Abonne au topic payment.commands (groupe payment-service-cg)");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Kafka indisponible, nouvelle tentative dans 5s");
-                Thread.Sleep(5000);
-            }
-        }
-        if (consumer is null) return;
+        }).Build();
+        consumer.Subscribe("payment.commands");
+        _logger.LogInformation("Abonne au topic payment.commands (groupe payment-service-cg)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -230,7 +228,6 @@ class PaymentCommandsConsumer : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (ConsumeException ex) { _logger.LogError(ex, "Erreur de consommation Kafka"); }
         }
-        consumer.Close();
     }
 
     private async Task Handle(string json)
@@ -263,7 +260,7 @@ class PaymentCommandsConsumer : BackgroundService
                 case "RefundPayment":
                 {
                     var cmd = data.Deserialize<RefundPaymentCommand>(JsonOptions)!;
-                    if (!_paymentsByOrder.TryGetValue(cmd.OrderId, out var paymentId) || !_payments.TryGetValue(paymentId, out var payment))
+                    if (FindPaymentByOrder(cmd.OrderId) is not { } payment)
                     {
                         _logger.LogWarning("RefundPayment recu pour une commande sans paiement connu {OrderId}", cmd.OrderId);
                         return;
@@ -272,10 +269,7 @@ class PaymentCommandsConsumer : BackgroundService
                     {
                         return; // deja rembourse (idempotence)
                     }
-                    var refundAmount = cmd.Amount ?? payment.Amount;
-                    payment.Status = refundAmount >= payment.Amount ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;
-                    await _publisher.PublishAsync("PaymentRefunded", payment.OrderId.ToString(),
-                        new { orderId = payment.OrderId, paymentId = payment.Id, amount = refundAmount });
+                    PaymentProcessor.Refund(payment, cmd.Amount, _publisher);
                     break;
                 }
             }
@@ -285,6 +279,9 @@ class PaymentCommandsConsumer : BackgroundService
             _logger.LogError(ex, "Impossible de traiter une commande payment.commands");
         }
     }
+
+    private Payment? FindPaymentByOrder(Guid orderId) =>
+        _paymentsByOrder.TryGetValue(orderId, out var id) && _payments.TryGetValue(id, out var p) ? p : null;
 }
 
 record ProcessPaymentCommand(Guid OrderId, decimal Amount, string? Currency);

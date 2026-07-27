@@ -63,30 +63,18 @@ class DomainEventsConsumer : BackgroundService
 
     private void Consume(CancellationToken stoppingToken)
     {
-        var config = new ConsumerConfig
+        // Build()/Subscribe() sont des appels locaux (aucune I/O reseau immediate) : librdkafka gere
+        // en interne la (re)connexion aux brokers de facon asynchrone. Inutile de les entourer d'une
+        // boucle de retry - seule la boucle de consommation ci-dessous a besoin d'un try/catch.
+        using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
         {
             BootstrapServers = _bootstrapServers,
             GroupId = "notification-service-cg",
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoCommit = true
-        };
-
-        IConsumer<string, string>? consumer = null;
-        while (!stoppingToken.IsCancellationRequested && consumer is null)
-        {
-            try
-            {
-                consumer = new ConsumerBuilder<string, string>(config).Build();
-                consumer.Subscribe(new[] { "order.events", "payment.events", "delivery.events" });
-                _logger.LogInformation("Abonne a order.events, payment.events, delivery.events (groupe notification-service-cg)");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Kafka indisponible, nouvelle tentative dans 5s");
-                Thread.Sleep(5000);
-            }
-        }
-        if (consumer is null) return;
+        }).Build();
+        consumer.Subscribe(new[] { "order.events", "payment.events", "delivery.events" });
+        _logger.LogInformation("Abonne a order.events, payment.events, delivery.events (groupe notification-service-cg)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -98,7 +86,6 @@ class DomainEventsConsumer : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (ConsumeException ex) { _logger.LogError(ex, "Erreur de consommation Kafka"); }
         }
-        consumer.Close();
     }
 
     private void Handle(string json)

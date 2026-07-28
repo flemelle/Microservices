@@ -1,0 +1,14 @@
+{
+  "Routes": [
+    { "DownstreamPathTemplate": "/v1/restaurants", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8081 } ], "UpstreamPathTemplate": "/v1/restaurants", "UpstreamHttpMethod": [ "Get", "Post" ] },
+    { "DownstreamPathTemplate": "/v1/restaurants/{everything}", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8081 } ], "UpstreamPathTemplate": "/v1/restaurants/{everything}", "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ] },
+    { "DownstreamPathTemplate": "/v1/catalog/{everything}", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8082 } ], "UpstreamPathTemplate": "/v1/catalog/{everything}", "UpstreamHttpMethod": [ "Get" ] },
+    { "DownstreamPathTemplate": "/v1/orders", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8083 } ], "UpstreamPathTemplate": "/v1/orders", "UpstreamHttpMethod": [ "Get", "Post" ] },
+    { "DownstreamPathTemplate": "/v1/orders/{everything}", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8083 } ], "UpstreamPathTemplate": "/v1/orders/{everything}", "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ] },
+    { "DownstreamPathTemplate": "/v1/payments", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8084 } ], "UpstreamPathTemplate": "/v1/payments", "UpstreamHttpMethod": [ "Get", "Post" ] },
+    { "DownstreamPathTemplate": "/v1/payments/{everything}", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8084 } ], "UpstreamPathTemplate": "/v1/payments/{everything}", "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ] },
+    { "DownstreamPathTemplate": "/v1/delivery/{everything}", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8085 } ], "UpstreamPathTemplate": "/v1/delivery/{everything}", "UpstreamHttpMethod": [ "Get", "Post", "Put", "Delete" ] },
+    { "DownstreamPathTemplate": "/v1/notifications", "DownstreamScheme": "http", "DownstreamHostAndPorts": [ { "Host": "127.0.0.1", "Port": 8086 } ], "UpstreamPathTemplate": "/v1/notifications", "UpstreamHttpMethod": [ "Get" ] }
+  ],
+  "GlobalConfiguration": { "BaseUrl": "http://localhost:8080" }
+}

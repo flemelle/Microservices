@@ -5,6 +5,7 @@ Projet de conception d'une architecture microservices pour une plateforme de liv
 
 > **Documentation complète** : [`docs/architecture.md`](docs/architecture.md) (description générale,
 > découpage DDD, communication inter-services, SAGA, résilience, CQRS, diagrammes Mermaid).
+> **Synthèse des choix architecturaux** : [`docs/choix-architecturaux.md`](docs/choix-architecturaux.md).
 > **ADRs** : [`docs/adr/`](docs/adr/). **Contrats OpenAPI** : [`docs/api/`](docs/api/).
 
 ## Stack
